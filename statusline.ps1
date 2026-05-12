@@ -51,7 +51,7 @@ function Format-RateLimit {
     return "{0} {1} {2}%({3})" -f $Label, $bar, $pctInt, $time
 }
 
-# JSONからモデル名を取得（display_name → id → "?" の優先順）
+# JSONからモデル名を取得
 function Get-ModelName {
     param([object]$Json)
     $defaultName = [string][char]0x3F  # "?" フォールバック
@@ -76,7 +76,7 @@ function Get-ModelName {
 
 # ── OAuth & Extra Usage ───────────────────────────────────
 
-# OAuthトークンを取得（環境変数 → Windowsクレデンシャル → .credentials.json）
+# OAuthトークンを取得
 function Get-OAuthToken {
     if ($env:CLAUDE_CODE_OAUTH_TOKEN) { return $env:CLAUDE_CODE_OAUTH_TOKEN }
 
@@ -107,7 +107,7 @@ function Get-OAuthToken {
     return $null
 }
 
-# Anthropic APIからExtra Usage情報を取得（60秒キャッシュ、課金なし）
+# Anthropic APIからExtra Usage情報を取得
 function Get-ExtraUsageData {
     $cacheDir = Join-Path $env:TEMP "claude"
     $cacheFile = Join-Path $cacheDir "statusline-usage-cache.json"
@@ -247,7 +247,7 @@ if ($null -ne $usageApiData) {
     }
 }
 
-# ── 1行目: モデル名 + コンテキスト + [EX] + cwd ──────────
+# ── 1行目: モデル名 + コンテキスト ───────
 
 if ($isExtraActive) {
     # Extra Usage有効時: |[EX]| インジケータを挿入
@@ -263,6 +263,23 @@ $fiveHour = $null
 $sevenDay = $null
 if ($null -ne $json.rate_limits) {
     $fiveHour = $json.rate_limits.five_hour
+    $sevenDay = $json.rate_limits.seven_day
+}
+
+$part5h = Format-RateLimit -Label "5h" -LimitObj $fiveHour
+$part7d = Format-RateLimit -Label "7d" -LimitObj $sevenDay
+
+if ($isExtraActive -and $extraSection -ne "") {
+    $line2 = "{0} | {1} | {2}" -f $part5h, $part7d, $extraSection
+}
+else {
+    $line2 = "{0} | {1}" -f $part5h, $part7d
+}
+
+# ── 出力 ──────────────────────────────────────────────────
+
+Write-Output $line1
+Write-Output $line2
     $sevenDay = $json.rate_limits.seven_day
 }
 
