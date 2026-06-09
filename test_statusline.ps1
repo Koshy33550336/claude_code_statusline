@@ -1,4 +1,4 @@
-<#
+﻿<#
   test_statusline.ps1 - Test script for statusline.ps1
   Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .\test_statusline.ps1
 #>
@@ -20,13 +20,27 @@ $EB   = '-'
 $PIPE = [string][char]0x7C
 
 # 期待される1行目の文字列を生成（モデル名、コンテキスト使用率、パス）
-function Build-Line1([string]$Model, [string]$Ctx, [string]$Cwd) {
+function Build-Line1 {
+    param(
+        [string]$Model,
+        [string]$Ctx,
+        [string]$Cwd
+    )
     return '[' + $Model + '] Ctx: ' + $Ctx + '% ' + $PIPE + ' cwd: ' + $Cwd
 }
 
 # 期待される2行目の文字列を生成（レートリミット用プログレスバーと時間）
-function Build-Line2([int]$F5, [int]$E5, [string]$P5, [string]$T5,
-                     [int]$F7, [int]$E7, [string]$P7, [string]$T7) {
+function Build-Line2 {
+    param(
+        [int]$F5,
+        [int]$E5,
+        [string]$P5,
+        [string]$T5,
+        [int]$F7,
+        [int]$E7,
+        [string]$P7,
+        [string]$T7
+    )
     $bar5 = ($FB * $F5) + ($EB * $E5)
     $bar7 = ($FB * $F7) + ($EB * $E7)
     return '5h ' + $bar5 + ' ' + $P5 + '%(' + $T5 + ') ' + $PIPE + ' 7d ' + $bar7 + ' ' + $P7 + '%(' + $T7 + ')'
@@ -39,7 +53,8 @@ function Build-FallbackLine2 {
 }
 
 # ハッシュテーブルをJSONに変換し、一時ファイルに保存してパスを返す
-function Write-JsonToTempFile([hashtable]$Data) {
+function Write-JsonToTempFile {
+    param([hashtable]$Data)
     $tmpFile = [System.IO.Path]::GetTempFileName()
     $json = $Data | ConvertTo-Json -Depth 10 -Compress
     [System.IO.File]::WriteAllText($tmpFile, $json, [System.Text.Encoding]::UTF8)
@@ -47,41 +62,64 @@ function Write-JsonToTempFile([hashtable]$Data) {
 }
 
 # 生の文字列（空文字など）を一時ファイルに保存してパスを返す
-function Write-RawJsonToTempFile([string]$RawJson) {
+function Write-RawJsonToTempFile {
+    param([string]$RawJson)
     $tmpFile = [System.IO.Path]::GetTempFileName()
     [System.IO.File]::WriteAllText($tmpFile, $RawJson, [System.Text.Encoding]::UTF8)
     return $tmpFile
 }
 
-# 一時ファイルを標準入力としてスクリプトを実行し、期待値と比較するメイン処理
-function Run-TestFromFile([string]$Name, [string]$TmpFile, [string[]]$ExpectedLines) {
+# 一時ファイルの内容を標準入力としてスクリプトを実行し、期待値と比較するメイン処理
+#
+# 注意点:
+#  - 入力はパイプ (`|`) で渡す。ProcessStartInfo + StandardInput.Write は
+#    親子間のstdinエンコーディングが一致せず、日本語環境ではJSONが文字化けして
+#    本体スクリプトがフォールバック表示になるため使わない。
+#  - Extra Usage を確定的に無効化するため、隔離した環境変数で子を起動する。
+#    認証情報 (CLAUDE_CONFIG_DIR / LOCALAPPDATA / CLAUDE_CODE_OAUTH_TOKEN) と
+#    キャッシュ (TEMP) を遮断すると Get-ExtraUsageData が null を返し、
+#    `|[EX]|` や `EX ...` が出力されなくなるので期待値と一致する。
+function Run-TestFromFile {
+    param(
+        [string]$Name,
+        [string]$TmpFile,
+        [string[]]$ExpectedLines
+    )
     Write-Host ''
     Write-Host ('=' * 60) -ForegroundColor DarkGray
     Write-Host ('TEST: ' + $Name) -ForegroundColor Cyan
 
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = 'powershell'
-    $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $scriptPath + '"'
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-
-    $proc = [System.Diagnostics.Process]::Start($psi)
-
+    # 入力内容を読み取り (空入力の場合は空文字)
+    $content = ''
     if (Test-Path $TmpFile) {
-        $content = [System.IO.File]::ReadAllText($TmpFile, [System.Text.Encoding]::UTF8)
-        $proc.StandardInput.Write($content)
+        $content = [System.IO.File]::ReadAllText($TmpFile, (New-Object System.Text.UTF8Encoding($false)))
+        Remove-Item $TmpFile -Force
     }
-    $proc.StandardInput.Close()
 
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $proc.WaitForExit()
+    # Extra Usage を無効化するための隔離環境を用意
+    $isoCfg = Join-Path ([System.IO.Path]::GetTempPath()) ('iso_cfg_' + [guid]::NewGuid().ToString('N'))
+    $isoTmp = Join-Path ([System.IO.Path]::GetTempPath()) ('iso_tmp_' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $isoCfg -Force | Out-Null
+    New-Item -ItemType Directory -Path $isoTmp -Force | Out-Null
 
-    if (Test-Path $TmpFile) { Remove-Item $TmpFile -Force }
+    $save = @{
+        CFG = $env:CLAUDE_CONFIG_DIR; TOK = $env:CLAUDE_CODE_OAUTH_TOKEN
+        TMP = $env:TEMP; TMP2 = $env:TMP; LAD = $env:LOCALAPPDATA
+    }
+    try {
+        $env:CLAUDE_CONFIG_DIR       = $isoCfg
+        $env:CLAUDE_CODE_OAUTH_TOKEN = $null
+        $env:TEMP = $isoTmp; $env:TMP = $isoTmp
+        $env:LOCALAPPDATA = $isoTmp
+        $result = $content | powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath
+    }
+    finally {
+        $env:CLAUDE_CONFIG_DIR = $save.CFG; $env:CLAUDE_CODE_OAUTH_TOKEN = $save.TOK
+        $env:TEMP = $save.TMP; $env:TMP = $save.TMP2; $env:LOCALAPPDATA = $save.LAD
+        Remove-Item $isoCfg, $isoTmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
 
-    $lines = $stdout.Split([Environment]::NewLine, [StringSplitOptions]::RemoveEmptyEntries)
+    $lines = @($result | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_ -ne '' })
 
     Write-Host ('  Lines: ' + $lines.Count) -ForegroundColor DarkGray
     for ($i = 0; $i -lt $lines.Count; $i++) {
@@ -122,7 +160,8 @@ $pastEpoch = [long]([DateTimeOffset]::Now.AddHours(-1).ToUnixTimeSeconds())
 # -- Helper: compute expected time string from epoch --
 
 # エポック秒から期待される残り時間の文字列を計算
-function Get-ExpectedTime([long]$Epoch) {
+function Get-ExpectedTime {
+    param([long]$Epoch)
     $resetTime = [DateTimeOffset]::FromUnixTimeSeconds($Epoch).LocalDateTime
     $diff = $resetTime - (Get-Date)
     if ($diff.TotalSeconds -le 0) { return '--' }
