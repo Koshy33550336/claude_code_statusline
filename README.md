@@ -1,8 +1,9 @@
-[README.md](https://github.com/user-attachments/files/28757302/README.md)
 # Claude Code カスタムステータスライン (Windows PowerShell)
 
 Claude Code CLI のステータスラインをカスタマイズする PowerShell スクリプトです。
 モデル名・コンテキスト使用率・レートリミット・Extra Usage（追加クレジット）をリアルタイムに表示します。
+
+> 別PCへ移す場合は、まず必ず [⚠️ 最重要: 文字エンコーディング](#️-最重要-文字エンコーディング) を読んでください。
 
 ---
 
@@ -251,6 +252,49 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\test_statusline.ps1
 | パスエラー | settings.json のユーザー名が間違い | `command` 内のパスを確認する |
 | `[EX]` が表示されない | 追加クレジットの使用額が $0.00 | 仕様です（使用額が$0超になると自動表示）。Extra Usage 自体が未有効/認証情報なしの場合も非表示 |
 | Extra Usage の金額が更新されない | キャッシュ期間中（60秒） | 最大60秒待つと自動更新される |
+| **構文エラーは出ないのに `[?] Ctx: --% \| cwd: --` だけ表示される（日本語環境）** | PowerShell 5.1 が stdin を OS の ANSI コードページ（cp932 / Shift-JIS）で読んでしまい、Claude Code が UTF-8 で送る JSON 中の日本語フィールド（`session_name` 等）が壊れて `ConvertFrom-Json` が失敗 | 本体先頭で `[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)` を設定済み（v2 以降）。古いバージョンを使っている場合は最新を取得 |
+
+### デバッグログ（自己診断用）
+
+「以前は動いていたのに急にフォールバック表示になった」場合、Claude Code の statusline JSON スキーマ変更などが疑われます。環境変数 `CLAUDE_STATUSLINE_DEBUG=1` を設定して Claude Code を再起動すると、`%TEMP%\claude\statusline-debug.log` に **stdin の生 JSON とフォールバック理由** が記録され、原因を切り分けられます（通常運用では設定不要）。
+
+```powershell
+# PowerShellで有効化（このセッションのみ）
+$env:CLAUDE_STATUSLINE_DEBUG = '1'
+# 永続化する場合
+[Environment]::SetEnvironmentVariable('CLAUDE_STATUSLINE_DEBUG', '1', 'User')
+```
+
+ログ確認:
+
+```powershell
+Get-Content (Join-Path $env:TEMP 'claude\statusline-debug.log') -Tail 30
+```
+
+---
+
+## 将来の Claude Code 更新で壊れる可能性と対策
+
+本スクリプトは Claude Code の **非公開仕様**（statusline に渡される JSON、および `/api/oauth/usage` エンドポイント）に依存しています。Anthropic 側の変更で表示が崩れる可能性があるため、以下の挙動・対策を理解しておくと安心です。
+
+| リスク | 影響 | 設計上の備え |
+|---|---|---|
+| statusline JSON のフィールド名変更（例: `model.display_name` → 別名） | モデル名が `?`、コンテキストや cwd が `--` に化ける | 各フィールドを null セーフに参照し、欠損時は `?` / `--` にフォールバックして本体は落とさない |
+| `rate_limits.five_hour` / `seven_day` の構造変更 | レートリミット行が `--%(--)` 表示に | `Format-RateLimit` で `$null` チェック済み |
+| `/api/oauth/usage` のレスポンス形式変更 | `[EX]` / `EX ...` が出なくなる（または金額が `0.00` 固定に） | `extra_usage.used_credits` と `monthly_limit` の存在を都度確認、無ければ Extra Usage 表示自体を抑止 |
+| OAuth トークン保存場所の変更 | Extra Usage 表示が出なくなる | 2箇所（`%LOCALAPPDATA%\Claude Code\credentials.json` / `~/.claude/.credentials.json`）と環境変数 `CLAUDE_CODE_OAUTH_TOKEN` をフォールバックで参照 |
+| User-Agent ベースのアクセス制限導入 | `/api/oauth/usage` が 4xx で返り `[EX]` が出なくなる | 現状 `claude-code/2.1.34` をハードコード。問題が起きたら本体先頭付近の `User-Agent` を Claude Code 最新バージョン文字列に書き換える |
+| stdin エンコーディング周りの仕様変更 | 日本語環境で再びフォールバック表示 | `[Console]::InputEncoding` を UTF-8 に明示固定済み |
+
+### 切り分け手順（フォールバック表示になったとき）
+
+1. **構文エラーが出ているか確認** → 出ていれば文字エンコーディング問題（[最重要セクション](#️-最重要-文字エンコーディング)）
+2. **`CLAUDE_STATUSLINE_DEBUG=1` を設定して再起動** → ログを取得
+3. ログの `[stdin len=...]` 行をチェック:
+   - `len=0` → Claude Code が stdin を渡していない（Claude Code 側の問題、または settings.json のコマンド誤り）
+   - `len>0` でも `fallback: ConvertFrom-Json failed:` が記録 → JSON が壊れている（エンコーディング起因、または Claude Code が不正な JSON を送っている）
+   - `len>0` で fallback ログ無しなのに `[?] / --` 表示 → JSON は parse 成功するがフィールド名が変わっている。ログ中の生 JSON を見て新しいフィールド名を確認し、本体を修正
+4. **`test_statusline.ps1` を実行** → 9 件全て PASS なら本体ロジックは正常。Claude Code 側の問題に絞り込める
 
 ---
 
@@ -260,11 +304,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\test_statusline.ps1
 |---|---|
 | 外部ツール | 不使用（`jq` 等は不要、PowerShell 標準の `ConvertFrom-Json` のみ） |
 | ファイルエンコード | UTF-8 (BOM付き)。PowerShell 5.1 がロケール非依存で正しく読み込むため必須 |
+| stdin エンコード | 本体先頭で `[Console]::InputEncoding` を **UTF-8 に明示固定**。日本語ロケールで Shift-JIS と誤読されて日本語フィールドが壊れる問題への対策 |
 | 入力 | Claude Code が stdin 経由で送信する JSON |
 | 出力 | `Write-Output` による2行のプレーンテキスト |
 | null 安全 | 各フィールドの欠損・null に対してフォールバック表示 (`--`) を使用 |
-| Extra Usage | Anthropic OAuth API (`/api/oauth/usage`) から取得（60秒キャッシュ、課金なし）。`is_enabled` が true かつ使用額 > $0 の時のみ表示 |
-| 認証情報 | `%LOCALAPPDATA%\Claude Code\credentials.json` または `~/.claude/.credentials.json` から OAuth トークンを自動取得 |
+| Extra Usage | Anthropic OAuth API (`/api/oauth/usage`) から取得（60秒キャッシュ、課金なし）。`is_enabled` が true かつ使用額 > $0 の時のみ表示。**非公開エンドポイントのため Anthropic 側の変更で停止する可能性あり** |
+| 認証情報 | `%LOCALAPPDATA%\Claude Code\credentials.json` または `~/.claude/.credentials.json` から OAuth トークンを自動取得。Anthropic 公式 API への問い合わせ以外には一切送信・保存しない |
+| デバッグ | `CLAUDE_STATUSLINE_DEBUG=1` で `%TEMP%\claude\statusline-debug.log` に動作ログ出力（任意） |
 
 ---
 
