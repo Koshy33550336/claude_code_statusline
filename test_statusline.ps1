@@ -296,6 +296,30 @@ $e8t7 = Get-ExpectedTime $future7d
 $e8L2 = '5h ' + $bar5fb + ' --%(--) ' + $PIPE + ' 7d ' + $bar7p + ' 25%(' + $e8t7 + ')'
 Run-TestFromFile 'No five_hour' $t8 @($e8L1, $e8L2)
 
+# -- Test 9: 日本語フィールドを含むJSON（Shift-JIS誤読リグレッション） --
+#
+# Claude Code 2.1.x の session_name に日本語が入るケース。
+# 本体が stdin を Shift-JIS として読むと、UTF-8 の「業」「翻」等の
+# 3バイト列のうち偶発的に 0x5C (`\`) が出現して JSON エスケープが壊れ、
+# ConvertFrom-Json が失敗してフォールバック表示に落ちる。
+# 本体先頭で [Console]::InputEncoding を UTF-8 に固定する修正の回帰防止。
+$data9 = @{
+    cwd          = 'C:\test\proj'
+    session_name = '英語論文の翻訳作業計画書'
+    model        = @{ display_name = 'Opus 4.8' }
+    context_window = @{ used_percentage = 7 }
+    rate_limits = @{
+        five_hour = @{ used_percentage = 15; resets_at = $future5h }
+        seven_day = @{ used_percentage = 2;  resets_at = $future7d }
+    }
+}
+$t9 = Write-JsonToTempFile $data9
+$e9L1 = Build-Line1 'Opus 4.8' '7' 'C:\test\proj'
+$e9t5 = Get-ExpectedTime $future5h
+$e9t7 = Get-ExpectedTime $future7d
+$e9L2 = Build-Line2 1 9 '15' $e9t5 0 10 '2' $e9t7
+Run-TestFromFile 'Japanese session_name (Shift-JIS regression)' $t9 @($e9L1, $e9L2)
+
 # -- Summary --
 
 Write-Host ''
